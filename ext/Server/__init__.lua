@@ -8,8 +8,8 @@ require '__shared/MeshBuilder'
 require '__shared/S3Signer'
 require '__shared/DataExporter'
 
-local MapScanEngine = require '__server/MapScanEngine'
-local RCONBridge = require '__server/RCONBridge'
+local MapScanEngine = require 'MapScanEngine'
+local RCONBridge = require 'RCONBridge'
 
 -- Create singletons
 g_MapScanEngine = MapScanEngine()

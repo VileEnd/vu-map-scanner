@@ -3,7 +3,7 @@
 require '__shared/ScanConfig'
 require '__shared/ScanLogger'
 
-local MapScanClient = require '__client/MapScanClient'
+local MapScanClient = require 'MapScanClient'
 
 -- Create the singleton client
 g_MapScanClient = MapScanClient()
