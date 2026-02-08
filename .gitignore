@@ -1,0 +1,5 @@
+.vu/
+node_modules/
+output/
+*.db
+*.sqlite
