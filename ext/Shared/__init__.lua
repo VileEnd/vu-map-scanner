@@ -4,6 +4,7 @@
 require '__shared/ScanConfig'
 require '__shared/ScanLogger'
 require '__shared/MeshBuilder'
+require '__shared/S3Signer'
 require '__shared/DataExporter'
 
 print('[MapScanner] Shared modules loaded')
