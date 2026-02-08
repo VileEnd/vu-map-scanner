@@ -171,4 +171,119 @@ function S3Signer.SignPutRequest(accessKey, secretKey, region, bucket, objectKey
 	}
 end
 
+--- Generate AWS Signature V4 authorization header for S3 GET request (bucket probe)
+function S3Signer.SignGetRequest(accessKey, secretKey, region, bucket, objectKey, queryString, endpoint, pathStyle)
+	local nowUnix = os.time()
+	local requestDateTime = os.date('!%Y%m%dT%H%M%SZ', nowUnix)
+	local dateStamp = os.date('!%Y%m%d', nowUnix)
+
+	objectKey = objectKey or ''
+	queryString = queryString or ''
+
+	local host, canonicalUri
+	if pathStyle then
+		host = (endpoint and endpoint ~= '') and endpoint or ('s3.' .. region .. '.amazonaws.com')
+		if objectKey ~= '' then
+			canonicalUri = '/' .. bucket .. '/' .. uri_encode_path(objectKey)
+		else
+			canonicalUri = '/' .. bucket .. '/'
+		end
+	else
+		if endpoint and endpoint ~= '' then
+			host = bucket .. '.' .. endpoint
+		else
+			host = bucket .. '.s3.' .. region .. '.amazonaws.com'
+		end
+		canonicalUri = '/' .. (objectKey ~= '' and uri_encode_path(objectKey) or '')
+	end
+
+	local payloadHash = sha256_hex('')  -- empty body for GET
+	local canonicalHeaders = 'host:' .. host .. '\n' ..
+	                         'x-amz-content-sha256:' .. payloadHash .. '\n' ..
+	                         'x-amz-date:' .. requestDateTime
+	local signedHeaders = 'host;x-amz-content-sha256;x-amz-date'
+
+	local canonicalRequest = table.concat({
+		'GET', canonicalUri, queryString, canonicalHeaders, '', signedHeaders, payloadHash
+	}, '\n')
+
+	local credentialScope = dateStamp .. '/' .. region .. '/s3/aws4_request'
+	local stringToSign = table.concat({
+		'AWS4-HMAC-SHA256', requestDateTime, credentialScope, sha256_hex(canonicalRequest)
+	}, '\n')
+
+	local signingKey = get_signing_key(secretKey, dateStamp, region, 's3')
+	local signature = hex_encode(hmac_sha256(signingKey, stringToSign))
+
+	local authorizationHeader = 'AWS4-HMAC-SHA256 ' ..
+		'Credential=' .. accessKey .. '/' .. credentialScope .. ', ' ..
+		'SignedHeaders=' .. signedHeaders .. ', ' ..
+		'Signature=' .. signature
+
+	return {
+		['Host'] = host,
+		['x-amz-content-sha256'] = payloadHash,
+		['x-amz-date'] = requestDateTime,
+		['Authorization'] = authorizationHeader
+	}, {
+		host = host, canonicalUri = canonicalUri
+	}
+end
+
+--- Generate AWS Signature V4 for S3 PUT bucket (create bucket)
+function S3Signer.SignCreateBucket(accessKey, secretKey, region, bucket, endpoint, pathStyle)
+	local nowUnix = os.time()
+	local requestDateTime = os.date('!%Y%m%dT%H%M%SZ', nowUnix)
+	local dateStamp = os.date('!%Y%m%d', nowUnix)
+
+	local host, canonicalUri
+	if pathStyle then
+		host = (endpoint and endpoint ~= '') and endpoint or ('s3.' .. region .. '.amazonaws.com')
+		canonicalUri = '/' .. bucket .. '/'
+	else
+		if endpoint and endpoint ~= '' then
+			host = bucket .. '.' .. endpoint
+		else
+			host = bucket .. '.s3.' .. region .. '.amazonaws.com'
+		end
+		canonicalUri = '/'
+	end
+
+	local payload = ''
+	local payloadHash = sha256_hex(payload)
+	local contentType = 'application/xml'
+	local canonicalHeaders = 'content-type:' .. contentType .. '\n' ..
+	                         'host:' .. host .. '\n' ..
+	                         'x-amz-content-sha256:' .. payloadHash .. '\n' ..
+	                         'x-amz-date:' .. requestDateTime
+	local signedHeaders = 'content-type;host;x-amz-content-sha256;x-amz-date'
+
+	local canonicalRequest = table.concat({
+		'PUT', canonicalUri, '', canonicalHeaders, '', signedHeaders, payloadHash
+	}, '\n')
+
+	local credentialScope = dateStamp .. '/' .. region .. '/s3/aws4_request'
+	local stringToSign = table.concat({
+		'AWS4-HMAC-SHA256', requestDateTime, credentialScope, sha256_hex(canonicalRequest)
+	}, '\n')
+
+	local signingKey = get_signing_key(secretKey, dateStamp, region, 's3')
+	local signature = hex_encode(hmac_sha256(signingKey, stringToSign))
+
+	local authorizationHeader = 'AWS4-HMAC-SHA256 ' ..
+		'Credential=' .. accessKey .. '/' .. credentialScope .. ', ' ..
+		'SignedHeaders=' .. signedHeaders .. ', ' ..
+		'Signature=' .. signature
+
+	return {
+		['Host'] = host,
+		['Content-Type'] = contentType,
+		['x-amz-content-sha256'] = payloadHash,
+		['x-amz-date'] = requestDateTime,
+		['Authorization'] = authorizationHeader
+	}, {
+		host = host, canonicalUri = canonicalUri
+	}
+end
+
 return S3Signer

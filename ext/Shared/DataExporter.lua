@@ -173,4 +173,106 @@ function DataExporter:IsUploadComplete()
     return self.pendingUploads <= 0
 end
 
+--- Build the bucket-root URL (no object key)
+--- @return string
+function DataExporter:BuildBucketUrl()
+    if ScanConfig.s3PathStyle then
+        if ScanConfig.s3Endpoint ~= '' then
+            return 'https://' .. ScanConfig.s3Endpoint .. '/' .. ScanConfig.s3Bucket .. '/'
+        else
+            return 'https://s3.' .. ScanConfig.s3Region .. '.amazonaws.com/' .. ScanConfig.s3Bucket .. '/'
+        end
+    else
+        if ScanConfig.s3Endpoint ~= '' then
+            return 'https://' .. ScanConfig.s3Bucket .. '.' .. ScanConfig.s3Endpoint .. '/'
+        else
+            return 'https://' .. ScanConfig.s3Bucket .. '.s3.' .. ScanConfig.s3Region .. '.amazonaws.com/'
+        end
+    end
+end
+
+--- Probe whether the S3 bucket exists (GET with list-type=2&max-keys=0)
+--- If the bucket doesn't exist, attempts to create it automatically.
+--- Calls callback(true) if the bucket is ready, callback(false) if not.
+--- @param callback function - callback(bucketReady: boolean)
+function DataExporter:ProbeBucket(callback)
+    if not self.enabled then
+        log:Error('S3 exporter not enabled — cannot probe bucket')
+        if callback then callback(false) end
+        return
+    end
+
+    -- Signed GET on bucket root with max-keys=0 (cheapest list call)
+    local queryString = 'list-type=2&max-keys=0'
+    local headers = S3Signer.SignGetRequest(
+        ScanConfig.s3AccessKey,
+        ScanConfig.s3SecretKey,
+        ScanConfig.s3Region,
+        ScanConfig.s3Bucket,
+        '',              -- no object key
+        queryString,
+        ScanConfig.s3Endpoint,
+        ScanConfig.s3PathStyle
+    )
+
+    local url = self:BuildBucketUrl() .. '?' .. queryString
+    local httpOptions = HttpOptions(headers, ScanConfig.s3Timeout)
+
+    log:Info('Probing S3 bucket "%s" ...', ScanConfig.s3Bucket)
+
+    local exporter = self
+    Net:GetHTTPAsync(url, httpOptions, function(response)
+        local status = response and response.status or 0
+        if status >= 200 and status < 300 then
+            log:Info('Bucket "%s" exists and is accessible (HTTP %d)', ScanConfig.s3Bucket, status)
+            if callback then callback(true) end
+        elseif status == 404 or (response and response.body and tostring(response.body):find('NoSuchBucket')) then
+            log:Warn('Bucket "%s" does not exist (HTTP %d) — attempting auto-create...', ScanConfig.s3Bucket, status)
+            exporter:CreateBucket(callback)
+        elseif status == 403 then
+            log:Error('Bucket probe DENIED (HTTP 403) — check S3 credentials and permissions')
+            if callback then callback(false) end
+        else
+            local body = response and response.body and tostring(response.body):sub(1, 300) or ''
+            log:Error('Bucket probe failed (HTTP %d): %s', status, body)
+            if callback then callback(false) end
+        end
+    end)
+end
+
+--- Create the S3 bucket using a signed PUT on the bucket root
+--- @param callback function - callback(success: boolean)
+function DataExporter:CreateBucket(callback)
+    local headers = S3Signer.SignCreateBucket(
+        ScanConfig.s3AccessKey,
+        ScanConfig.s3SecretKey,
+        ScanConfig.s3Region,
+        ScanConfig.s3Bucket,
+        ScanConfig.s3Endpoint,
+        ScanConfig.s3PathStyle
+    )
+
+    local url = self:BuildBucketUrl()
+    local httpOptions = HttpOptions(headers, ScanConfig.s3Timeout)
+
+    log:Info('Creating S3 bucket "%s" at %s ...', ScanConfig.s3Bucket, url)
+
+    Net:PutHTTPAsync(url, '', httpOptions, function(response)
+        local status = response and response.status or 0
+        if status >= 200 and status < 300 then
+            log:Info('Bucket "%s" created successfully (HTTP %d)', ScanConfig.s3Bucket, status)
+            if callback then callback(true) end
+        elseif status == 409 then
+            -- BucketAlreadyOwnedByYou — that's fine
+            log:Info('Bucket "%s" already exists (HTTP 409) — proceeding', ScanConfig.s3Bucket)
+            if callback then callback(true) end
+        else
+            local body = response and response.body and tostring(response.body):sub(1, 300) or ''
+            log:Error('Failed to create bucket "%s" (HTTP %d): %s', ScanConfig.s3Bucket, status, body)
+            log:Error('Please create the bucket manually via your S3 provider console')
+            if callback then callback(false) end
+        end
+    end)
+end
+
 return DataExporter

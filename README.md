@@ -30,6 +30,7 @@ MapScanner/
 │   │   └── DataExporter.lua        # S3 upload logic
 │   ├── Server/
 │   │   ├── __init__.lua            # Server bootstrap
+│   │   ├── StartupOverrides.lua    # Registers MapScanner.<key> commands for Startup.txt
 │   │   ├── MapScanEngine.lua       # Core scanner: topdown → interior → S3 export → rotate
 │   │   └── RCONBridge.lua          # RCON config commands
 │   └── Client/
@@ -52,7 +53,25 @@ MapScanner
 
 ### 2. Configure S3
 
-Edit `ext/Shared/ScanConfig.lua`:
+The recommended way is via `Admin/Startup.txt` (keeps secrets out of mod files):
+
+```
+MapScanner.s3Endpoint nbg1.your-objectstorage.com
+MapScanner.s3Region nbg1
+MapScanner.s3Bucket vu-mapscanner
+MapScanner.s3AccessKey YOUR_ACCESS_KEY
+MapScanner.s3SecretKey YOUR_SECRET_KEY
+MapScanner.s3PathStyle true
+MapScanner.activePreset turbo
+```
+
+> **Important:** `Startup.txt` runs RCON commands, not Lua.
+> - No equals signs: `MapScanner.s3Bucket vu-mapscanner` (not `= 'vu-mapscanner'`)
+> - No quotes: `MapScanner.s3Endpoint nbg1.your-objectstorage.com` (not `'nbg1...'`)
+> - No Lua comments: `MapScanner.s3PathStyle true` (not `true  -- comment`)
+> - Use `MapScanner.activePreset turbo` to set the preset (not `MapScanner.start turbo`)
+
+Alternatively, edit `ext/Shared/ScanConfig.lua` directly:
 
 ```lua
 ScanConfig.s3Endpoint = 'nbg1.your-objectstorage.com'
@@ -60,7 +79,7 @@ ScanConfig.s3Region = 'nbg1'
 ScanConfig.s3Bucket = 'vu-mapscanner'
 ScanConfig.s3AccessKey = 'YOUR_ACCESS_KEY'
 ScanConfig.s3SecretKey = 'YOUR_SECRET_KEY'
-ScanConfig.s3PathStyle = true  -- required for Hetzner
+ScanConfig.s3PathStyle = true
 ```
 
 Or set at runtime via RCON:
@@ -186,7 +205,31 @@ loader.load(`/assets/maps/${mapId}_terrain.glb`, (gltf) => {
 
 ## Configuration
 
-All settings in `ext/Shared/ScanConfig.lua`:
+### Via Startup.txt (recommended for secrets)
+
+Add to `Admin/Startup.txt` — these are RCON commands, not Lua:
+
+```
+MapScanner.s3AccessKey YOUR_KEY
+MapScanner.s3SecretKey YOUR_SECRET
+MapScanner.s3Endpoint nbg1.your-objectstorage.com
+MapScanner.s3Region nbg1
+MapScanner.s3Bucket vu-mapscanner
+MapScanner.s3PathStyle true
+MapScanner.activePreset turbo
+MapScanner.autoStart true
+MapScanner.autoRotate true
+MapScanner.autoStartDelay 10
+MapScanner.debugLogging false
+```
+
+Any `ScanConfig` key can be set this way: `MapScanner.<key> <value>`
+
+> **Do not** use Lua syntax (`= 'value'`), quotes, or inline comments (`-- comment`) in Startup.txt — these are RCON commands, not Lua.
+
+### Via ScanConfig.lua
+
+Alternatively, edit `ext/Shared/ScanConfig.lua` directly:
 
 ```lua
 -- Scanning

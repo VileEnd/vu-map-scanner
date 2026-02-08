@@ -42,39 +42,22 @@ ScanConfig.Maps = {
 
 -- ============================================================================
 -- Map Rotation for Auto-Scan
--- Order of maps to scan through automatically. ConquestLarge0 for max area,
--- Domination0 for CQ maps that don't have ConquestLarge.
+-- Order of maps to scan through automatically.
+-- Uses RealityMod AdvanceAndSecureStd mode. Layer = rounds param in mapList.add.
+-- At runtime, the actual game mode is detected from Level:Loaded and reused.
 -- ============================================================================
 ScanConfig.MapRotation = {
-    { mapId = 'MP_001',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_003',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_007',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_011',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_012',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_013',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_017',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_018',      gameMode = 'ConquestLarge0' },
-    { mapId = 'MP_Subway',   gameMode = 'ConquestLarge0' },
-    { mapId = 'XP1_001',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP1_002',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP1_003',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP1_004',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP2_Factory', gameMode = 'Domination0' },
-    { mapId = 'XP2_Office',  gameMode = 'Domination0' },
-    { mapId = 'XP2_Palace',  gameMode = 'Domination0' },
-    { mapId = 'XP2_Skybar',  gameMode = 'Domination0' },
-    { mapId = 'XP3_Alborz',  gameMode = 'ConquestLarge0' },
-    { mapId = 'XP3_Desert',  gameMode = 'ConquestLarge0' },
-    { mapId = 'XP3_Shield',  gameMode = 'ConquestLarge0' },
-    { mapId = 'XP3_Valley',  gameMode = 'ConquestLarge0' },
-    { mapId = 'XP4_FD',      gameMode = 'ConquestLarge0' },
-    { mapId = 'XP4_Parl',    gameMode = 'ConquestLarge0' },
-    { mapId = 'XP4_Quake',   gameMode = 'ConquestLarge0' },
-    { mapId = 'XP4_Rubble',  gameMode = 'ConquestLarge0' },
-    { mapId = 'XP5_001',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP5_002',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP5_003',     gameMode = 'ConquestLarge0' },
-    { mapId = 'XP5_004',     gameMode = 'ConquestLarge0' },
+    { mapId = 'XP1_001',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Strike at Karkand
+    { mapId = 'XP1_002',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Gulf of Oman
+    { mapId = 'XP1_003',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Sharqi Peninsula
+    { mapId = 'XP1_004',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Wake Island
+    { mapId = 'XP3_Desert',  gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Bandar Desert
+    { mapId = 'XP3_Shield',  gameMode = 'AdvanceAndSecureStd', layer = 6 },  -- Armored Shield (Issue 226)
+    { mapId = 'XP4_Parl',    gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Azadi Palace
+    { mapId = 'XP5_001',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Operation Riverside
+    { mapId = 'XP5_002',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Kandahar
+    { mapId = 'XP5_003',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Bay of Gdansk
+    { mapId = 'XP5_004',     gameMode = 'AdvanceAndSecureStd', layer = 1 },  -- Sabalan Pipeline
 }
 
 -- ============================================================================

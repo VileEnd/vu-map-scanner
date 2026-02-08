@@ -47,7 +47,7 @@ function MapScanEngine:__init()
 
     -- Data storage
     self.m_MeshBuilder = MeshBuilder:New()
-    self.m_DataExporter = DataExporter:New()
+    self.m_DataExporter = nil  -- created in StartScan() after Startup.txt overrides have applied
 
     -- Export state
     self.m_ExportChunks = {}
@@ -59,6 +59,7 @@ function MapScanEngine:__init()
 
     -- Auto-rotate: track scanned maps this session
     self.m_ScannedMaps = {}
+    self.m_CurrentGameMode = 'ConquestLarge0'  -- updated in OnLevelLoaded
 
     -- Upload completion check
     self.m_WaitingForUploads = false
@@ -96,6 +97,7 @@ end
 function MapScanEngine:OnLevelLoaded(levelName, gameMode)
     log:Info('Level loaded: %s (mode: %s)', tostring(levelName), tostring(gameMode))
 
+    self.m_CurrentGameMode = gameMode or 'ConquestLarge0'
     self.m_CurrentMapConfig = ScanConfig.GetMapConfig(levelName)
     if self.m_CurrentMapConfig then
         log:Info('Map recognized: %s (%s)', self.m_CurrentMapConfig.name, self.m_CurrentMapConfig.id)
@@ -208,7 +210,8 @@ function MapScanEngine:OnRconStatus(command, args, loggedIn)
 
     local elapsed = SharedUtils:GetTimeMS() / 1000 - self.m_StartTime
     local stats = self.m_MeshBuilder:GetStats()
-    local exportStats = self.m_DataExporter:GetStats()
+    local exportStats = self.m_DataExporter and self.m_DataExporter:GetStats()
+        or { exportedChunks = 0, failedExports = 0, pendingUploads = 0 }
 
     return {
         'OK',
@@ -262,6 +265,34 @@ function MapScanEngine:StartScan()
 
     self.m_AutoStartPending = false
 
+    -- Create exporter early so we can probe the bucket
+    self.m_DataExporter = DataExporter:New()
+
+    if not self.m_DataExporter.enabled then
+        log:Error('S3 exporter not ready — scan aborted')
+        return
+    end
+
+    -- Probe bucket before beginning the scan (async)
+    log:Info('Checking S3 bucket before scan...')
+    local engine = self
+    self.m_DataExporter:ProbeBucket(function(bucketReady)
+        if not bucketReady then
+            log:Error('S3 bucket not available — scan aborted. Create the bucket manually or check credentials.')
+            return
+        end
+        engine:BeginScanAfterProbe()
+    end)
+end
+
+--- Actually begin the scan after bucket probe succeeds
+function MapScanEngine:BeginScanAfterProbe()
+    local mapCfg = self.m_CurrentMapConfig
+    if mapCfg == nil then
+        log:Error('Map config lost during probe — scan aborted')
+        return
+    end
+
     -- Calculate grid parameters
     self.m_GridSpacing = ScanConfig.CalculateGridSpacing(mapCfg.width)
     local halfWidth = mapCfg.width / 2
@@ -301,8 +332,7 @@ function MapScanEngine:StartScan()
     -- Initialize mesh builder
     self.m_MeshBuilder:Init(mapCfg.id, mapCfg.name, self.m_GridSpacing)
 
-    -- Initialize data exporter (S3)
-    self.m_DataExporter = DataExporter:New()
+    -- DataExporter already created in StartScan() before probe
 
     -- Start!
     self.m_IsScanning = true
@@ -367,7 +397,7 @@ function MapScanEngine:OnEngineUpdate(dt)
 
     -- Handle waiting for S3 uploads to complete before rotating map
     if self.m_WaitingForUploads then
-        if self.m_DataExporter:IsUploadComplete() then
+        if self.m_DataExporter == nil or self.m_DataExporter:IsUploadComplete() then
             log:Info('All S3 uploads complete.')
             self.m_WaitingForUploads = false
             self:OnScanAndUploadComplete()
@@ -659,13 +689,17 @@ function MapScanEngine:OnScanAndUploadComplete()
         return
     end
 
-    log:Info('Rotating to next map: %s (%s)', nextMap.mapId, nextMap.gameMode)
+    log:Info('Rotating to next map: %s (gameMode: %s)', nextMap.mapId, self.m_CurrentGameMode)
 
     -- Use RCON to switch map
-    -- First clear and set the map list to just the target map, then run it
-    -- This is simpler than finding the index in the existing rotation
+    -- Use the currently detected game mode (from Level:Loaded) rather than the
+    -- hardcoded mode in MapRotation, since modded servers (e.g. RealityMod) use
+    -- custom game modes like AdvanceAndSecureStd instead of ConquestLarge0.
+    -- The layer (rounds param) comes from the rotation entry for maps with specific layers.
+    local gameMode = self.m_CurrentGameMode or nextMap.gameMode or 'AdvanceAndSecureStd'
+    local layer = tostring(nextMap.layer or 1)
     RCON:SendCommand('mapList.clear')
-    RCON:SendCommand('mapList.add', { nextMap.mapId, nextMap.gameMode, '1' })
+    RCON:SendCommand('mapList.add', { nextMap.mapId, gameMode, layer })
     RCON:SendCommand('mapList.setNextMapIndex', { '0' })
     RCON:SendCommand('mapList.runNextRound')
 
