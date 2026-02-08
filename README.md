@@ -116,12 +116,13 @@ Uses RCON commands to switch to the next map in the rotation list.
 
 ## Resolution Presets
 
-| Preset | Grid Spacing (small/med/large) | Interior Scan | Rays/Tick |
-|--------|-------------------------------|---------------|-----------|
-| `ultra`  | 1m / 2m / 4m | Yes (3m layers) | 50 |
-| `high`   | 2m / 4m / 8m | Yes (4m layers) | 100 |
-| `medium` | 5m / 10m / 20m | Yes (5m layers) | 200 |
-| `low`    | 10m / 20m / 40m | No | 500 |
+| Preset | Grid Spacing (small/med/large) | Interior Scan | Rays/Tick | Use Case |
+|--------|-------------------------------|---------------|-----------|----------|
+| `turbo`  | 4m / 8m / 16m | Yes (5m layers) | 2000 | Headless, no players |
+| `ultra`  | 1m / 2m / 4m | Yes (3m layers) | 500 | Highest detail |
+| `high`   | 2m / 4m / 8m | Yes (4m layers) | 500 | Good detail |
+| `medium` | 5m / 10m / 20m | Yes (5m layers) | 1000 | Balanced |
+| `low`    | 10m / 20m / 40m | No | 2000 | Quick overview |
 
 ## RCON Commands
 

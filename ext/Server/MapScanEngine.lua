@@ -148,7 +148,7 @@ function MapScanEngine:OnRconStart(command, args, loggedIn)
             ScanConfig.activePreset = preset
             log:Info('Preset overridden to: %s', preset)
         else
-            return { 'ERR', 'Unknown preset: ' .. preset .. '. Available: ultra, high, medium, low' }
+            return { 'ERR', 'Unknown preset: ' .. preset .. '. Available: turbo, ultra, high, medium, low' }
         end
     end
 
@@ -228,7 +228,7 @@ function MapScanEngine:OnRconPreset(command, args, loggedIn)
             ScanConfig.activePreset = preset
             return { 'OK', 'Preset set to: ' .. preset }
         else
-            return { 'ERR', 'Unknown preset. Available: ultra, high, medium, low' }
+            return { 'ERR', 'Unknown preset. Available: turbo, ultra, high, medium, low' }
         end
     end
     return { 'OK', 'Current preset: ' .. ScanConfig.activePreset }

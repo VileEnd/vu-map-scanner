@@ -81,31 +81,40 @@ ScanConfig.MapRotation = {
 -- Scan Resolution Presets
 -- ============================================================================
 ScanConfig.Presets = {
+    -- Turbo: fastest possible for headless servers with no players
+    -- Coarser grid but maxed-out rays per tick
+    turbo = {
+        maxGridSpacing = 4.0,
+        verticalStep = 5.0,
+        maxRaysPerTick = 2000,
+        interiorPasses = true,
+        interiorStepY = 5.0,
+    },
     ultra = {
         maxGridSpacing = 1.0,
         verticalStep = 2.0,
-        maxRaysPerTick = 50,
+        maxRaysPerTick = 500,
         interiorPasses = true,
         interiorStepY = 3.0,
     },
     high = {
         maxGridSpacing = 2.0,
         verticalStep = 3.0,
-        maxRaysPerTick = 100,
+        maxRaysPerTick = 500,
         interiorPasses = true,
         interiorStepY = 4.0,
     },
     medium = {
         maxGridSpacing = 5.0,
         verticalStep = 5.0,
-        maxRaysPerTick = 200,
+        maxRaysPerTick = 1000,
         interiorPasses = true,
         interiorStepY = 5.0,
     },
     low = {
         maxGridSpacing = 10.0,
         verticalStep = 10.0,
-        maxRaysPerTick = 500,
+        maxRaysPerTick = 2000,
         interiorPasses = false,
         interiorStepY = 0,
     },
