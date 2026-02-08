@@ -18,8 +18,14 @@ function MeshBuilder:New()
         gridMaxZ = -math.huge,
         spacing = 1.0,
         totalHits = 0,
+        droppedHits = 0,  -- hits discarded due to per-cell cap
         mapId = '',
         mapName = '',
+        -- Per-cell hit cap to prevent unbounded memory growth
+        -- 32-bit process has ~2GB limit; each hit ≈ 150 bytes in Lua tables
+        maxHitsPerCell = 20,
+        -- Lightweight heightmap (min Y per cell) — survives chunk flushing
+        heightGrid = {},  -- [gx][gz] = minY
     }
     setmetatable(instance, MeshBuilder)
     return instance
@@ -31,8 +37,11 @@ function MeshBuilder:Init(mapId, mapName, spacing)
     self.mapName = mapName
     self.spacing = spacing
     self.grid = {}
+    self.heightGrid = {}
     self.totalHits = 0
-    log:Info('MeshBuilder initialized for %s (%s) with spacing %.1fm', mapId, mapName, spacing)
+    self.droppedHits = 0
+    log:Info('MeshBuilder initialized for %s (%s) with spacing %.1fm (max %d hits/cell)',
+        mapId, mapName, spacing, self.maxHitsPerCell)
 end
 
 --- Quantize a world coordinate to grid index
@@ -59,6 +68,18 @@ function MeshBuilder:AddHit(x, y, z, nx, ny, nz)
         self.grid[gx][gz] = { hits = {} }
     end
 
+    -- Enforce per-cell hit cap to bound memory usage
+    if #self.grid[gx][gz].hits >= self.maxHitsPerCell then
+        self.droppedHits = self.droppedHits + 1
+        -- Still update heightmap even for dropped hits
+        if not self.heightGrid[gx] then self.heightGrid[gx] = {} end
+        local prevY = self.heightGrid[gx][gz]
+        if prevY == nil or y < prevY then
+            self.heightGrid[gx][gz] = y
+        end
+        return
+    end
+
     -- Store the hit (multiple hits per cell = multi-layer for interiors)
     table.insert(self.grid[gx][gz].hits, {
         x = x, y = y, z = z,
@@ -66,6 +87,13 @@ function MeshBuilder:AddHit(x, y, z, nx, ny, nz)
     })
 
     self.totalHits = self.totalHits + 1
+
+    -- Maintain lightweight heightmap (min Y = ground)
+    if not self.heightGrid[gx] then self.heightGrid[gx] = {} end
+    local prevY = self.heightGrid[gx][gz]
+    if prevY == nil or y < prevY then
+        self.heightGrid[gx][gz] = y
+    end
 
     -- Track grid bounds
     if gx < self.gridMinX then self.gridMinX = gx end
@@ -218,7 +246,8 @@ function MeshBuilder:GetChunks(chunkSize)
 end
 
 --- Build a simple heightmap-only export (for lightweight 2D maps)
---- Returns just the ground-level Y values on a regular grid
+--- Uses the compact heightGrid (min Y per cell) which is maintained
+--- independently of the full grid data and survives chunk flushing
 --- @return table { gridSpacing, originX, originZ, gridW, gridH, heights = {row={...}} }
 function MeshBuilder:BuildHeightmap()
     if self.gridMinX > self.gridMaxX then
@@ -232,17 +261,11 @@ function MeshBuilder:BuildHeightmap()
     for gz = self.gridMinZ, self.gridMaxZ do
         local row = {}
         for gx = self.gridMinX, self.gridMaxX do
-            if self.grid[gx] and self.grid[gx][gz] and #self.grid[gx][gz].hits > 0 then
-                -- Use the lowest (ground) hit
-                local lowestY = math.huge
-                for _, hit in ipairs(self.grid[gx][gz].hits) do
-                    if hit.y < lowestY then
-                        lowestY = hit.y
-                    end
-                end
-                table.insert(row, math.floor(lowestY * 100 + 0.5) / 100) -- 2 decimal places
+            local y = self.heightGrid[gx] and self.heightGrid[gx][gz]
+            if y ~= nil then
+                table.insert(row, math.floor(y * 100 + 0.5) / 100)
             else
-                table.insert(row, -9999) -- no data sentinel
+                table.insert(row, -9999)
             end
         end
         table.insert(heights, row)
@@ -347,14 +370,47 @@ function MeshBuilder:GetStats()
         end
     end
 
+    -- Rough memory estimate: ~150 bytes per hit in Lua tables
+    local estMemoryMB = (self.totalHits * 150) / (1024 * 1024)
+
     return {
         totalHits = self.totalHits,
+        droppedHits = self.droppedHits,
         cellCount = cellCount,
         multiLayerCells = multiLayerCells,
         maxLayers = maxLayers,
         gridRangeX = { self.gridMinX, self.gridMaxX },
         gridRangeZ = { self.gridMinZ, self.gridMaxZ },
+        estMemoryMB = math.floor(estMemoryMB * 10 + 0.5) / 10,
     }
+end
+
+--- Free grid data for a specific chunk region after it has been exported
+--- This allows incremental memory reclamation during export
+--- The heightGrid is NOT freed (it's compact and needed for final export)
+--- @param chunkStartGX number grid X start
+--- @param chunkStartGZ number grid Z start
+--- @param chunkSize number grid cells per chunk side
+--- @return number hitsFreed count of hits removed from memory
+function MeshBuilder:FreeChunkData(chunkStartGX, chunkStartGZ, chunkSize)
+    local hitsFreed = 0
+
+    for gx = chunkStartGX, chunkStartGX + chunkSize - 1 do
+        if self.grid[gx] then
+            for gz = chunkStartGZ, chunkStartGZ + chunkSize - 1 do
+                if self.grid[gx][gz] then
+                    hitsFreed = hitsFreed + #self.grid[gx][gz].hits
+                    self.grid[gx][gz] = nil
+                end
+            end
+            -- If column is now empty, remove it entirely
+            if next(self.grid[gx]) == nil then
+                self.grid[gx] = nil
+            end
+        end
+    end
+
+    return hitsFreed
 end
 
 return MeshBuilder

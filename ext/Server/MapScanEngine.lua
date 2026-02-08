@@ -545,9 +545,10 @@ function MapScanEngine:FinishScan()
     log:Info('========================================')
     log:Info('SCAN COMPLETE: %s', self.m_CurrentMapConfig.name)
     log:Info('  Total rays: %d', self.m_TotalRaysCast)
-    log:Info('  Total hits: %d', stats.totalHits)
+    log:Info('  Total hits: %d (dropped: %d due to cell cap)', stats.totalHits, stats.droppedHits)
     log:Info('  Grid cells with data: %d', stats.cellCount)
     log:Info('  Multi-layer cells: %d (max %d layers)', stats.multiLayerCells, stats.maxLayers)
+    log:Info('  Est. memory: %.1f MB', stats.estMemoryMB)
     log:Info('  Elapsed time: %.1fs (%.1f min)', elapsed, elapsed / 60)
     log:Info('========================================')
 
@@ -561,16 +562,20 @@ function MapScanEngine:ExportData()
     local mapId = self.m_CurrentMapConfig.id
     local stats = self.m_MeshBuilder:GetStats()
 
-    -- 1. Export heightmap
+    log:Info('Pre-export stats: %d hits (est. %.1f MB), %d dropped (cell cap)',
+        stats.totalHits, stats.estMemoryMB, stats.droppedHits)
+
+    -- 1. Export heightmap FIRST (uses compact heightGrid, not the full grid)
     local heightmapJSON = self.m_MeshBuilder:HeightmapToJSON()
     log:Info('Heightmap JSON: %d bytes', #heightmapJSON)
     self.m_DataExporter:ExportHeightmap(mapId, heightmapJSON)
 
-    -- 2. Export mesh chunks
+    -- 2. Export mesh chunks incrementally — build, upload, FREE each chunk's data
     local chunks = self.m_MeshBuilder:GetChunks(64)
-    log:Info('Exporting %d mesh chunks to S3...', #chunks)
+    log:Info('Exporting %d mesh chunks to S3 (streaming — freeing memory per chunk)...', #chunks)
 
     local uploadedChunks = 0
+    local totalFreed = 0
     for i, chunk in ipairs(chunks) do
         local chunkData = self.m_MeshBuilder:BuildChunk(chunk.startGX, chunk.startGZ, chunk.chunkSize)
         if chunkData.vertexCount > 0 then
@@ -578,18 +583,23 @@ function MapScanEngine:ExportData()
             self.m_DataExporter:ExportChunk(mapId, i, chunkJSON)
             uploadedChunks = uploadedChunks + 1
         end
+        -- Free this chunk's grid data to reclaim memory immediately
+        local freed = self.m_MeshBuilder:FreeChunkData(chunk.startGX, chunk.startGZ, chunk.chunkSize)
+        totalFreed = totalFreed + freed
     end
+
+    log:Info('Freed %d hits from grid after chunk export (grid should be ~empty)', totalFreed)
 
     -- 3. Export manifest with scan metadata
     local elapsed = SharedUtils:GetTimeMS() / 1000 - self.m_StartTime
     local manifestData = string.format(
         '{"mapId":"%s","mapName":"%s","preset":"%s","gridSpacing":%.2f,' ..
-        '"totalHits":%d,"cellCount":%d,"multiLayerCells":%d,"maxLayers":%d,' ..
+        '"totalHits":%d,"droppedHits":%d,"cellCount":%d,"multiLayerCells":%d,"maxLayers":%d,' ..
         '"totalRays":%d,"elapsedSeconds":%.1f,' ..
         '"chunkCount":%d,"center":[%.2f,%.2f],"width":%d,' ..
         '"yMin":%d,"yMax":%d,"scanTimestamp":%d}',
         mapId, self.m_CurrentMapConfig.name, ScanConfig.activePreset, self.m_GridSpacing,
-        stats.totalHits, stats.cellCount, stats.multiLayerCells, stats.maxLayers,
+        stats.totalHits, stats.droppedHits, stats.cellCount, stats.multiLayerCells, stats.maxLayers,
         self.m_TotalRaysCast, elapsed,
         uploadedChunks,
         self.m_CurrentMapConfig.center[1], self.m_CurrentMapConfig.center[2],
