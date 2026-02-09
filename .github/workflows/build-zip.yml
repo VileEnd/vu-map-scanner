@@ -19,15 +19,13 @@ jobs:
       - name: Create zip
         shell: bash
         run: |
-          mkdir -p dist
-          zip -r "dist/MapScanner.zip" . \
-            -x "tools/*" \
-            -x "dist/*" \
-            -x "output/*" \
-            -x "**/*.md" \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x ".gitignore"
+          mkdir -p dist staging/MapScanner
+          rsync -a --exclude='tools' --exclude='dist' --exclude='output' \
+            --exclude='.git' --exclude='.github' --exclude='.gitignore' \
+            --exclude='*.md' \
+            . staging/MapScanner/
+          cd staging
+          zip -r "../dist/MapScanner.zip" MapScanner/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
