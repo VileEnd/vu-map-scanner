@@ -19,6 +19,10 @@ function MeshBuilder:New()
         spacing = 1.0,
         totalHits = 0,
         droppedHits = 0,  -- hits discarded due to per-cell cap
+        freedHits = 0,    -- hits freed after chunk export (streaming mode)
+        cumulativeCells = 0,      -- total unique cells with hits (survives chunk flush)
+        cumulativeMultiLayer = 0, -- total multi-layer cells (survives chunk flush)
+        peakMaxLayers = 0,        -- maximum layers seen in any cell ever
         mapId = '',
         mapName = '',
         -- Per-cell hit cap to prevent unbounded memory growth
@@ -38,8 +42,16 @@ function MeshBuilder:Init(mapId, mapName, spacing)
     self.spacing = spacing
     self.grid = {}
     self.heightGrid = {}
+    self.gridMinX = math.huge
+    self.gridMaxX = -math.huge
+    self.gridMinZ = math.huge
+    self.gridMaxZ = -math.huge
     self.totalHits = 0
     self.droppedHits = 0
+    self.freedHits = 0
+    self.cumulativeCells = 0
+    self.cumulativeMultiLayer = 0
+    self.peakMaxLayers = 0
     log:Info('MeshBuilder initialized for %s (%s) with spacing %.1fm (max %d hits/cell)',
         mapId, mapName, spacing, self.maxHitsPerCell)
 end
@@ -58,7 +70,8 @@ end
 --- @param nx number normal X
 --- @param ny number normal Y
 --- @param nz number normal Z
-function MeshBuilder:AddHit(x, y, z, nx, ny, nz)
+--- @param matIdx number|nil physics material index (-1 if unavailable)
+function MeshBuilder:AddHit(x, y, z, nx, ny, nz, matIdx)
     local gx, gz = self:WorldToGrid(x, z)
 
     if not self.grid[gx] then
@@ -80,13 +93,43 @@ function MeshBuilder:AddHit(x, y, z, nx, ny, nz)
         return
     end
 
+    -- Deduplicate: skip if a hit already exists at nearly the same Y in this cell.
+    -- Interior horizontal rays often re-hit the same floor/ceiling surface that
+    -- the top-down pass already captured. Epsilon = half the grid spacing.
+    local dedupEps = self.spacing * 0.5
+    local existingHits = self.grid[gx][gz].hits
+    for i = 1, #existingHits do
+        if math.abs(existingHits[i].y - y) < dedupEps then
+            -- Already have a hit at this height — skip
+            -- Still update heightmap
+            if not self.heightGrid[gx] then self.heightGrid[gx] = {} end
+            local prevY2 = self.heightGrid[gx][gz]
+            if prevY2 == nil or y < prevY2 then
+                self.heightGrid[gx][gz] = y
+            end
+            return
+        end
+    end
+
     -- Store the hit (multiple hits per cell = multi-layer for interiors)
     table.insert(self.grid[gx][gz].hits, {
         x = x, y = y, z = z,
-        nx = nx or 0, ny = ny or 1, nz = nz or 0
+        nx = nx or 0, ny = ny or 1, nz = nz or 0,
+        mat = matIdx or -1
     })
 
     self.totalHits = self.totalHits + 1
+
+    -- Track cumulative cell stats (these survive streaming chunk flushes)
+    local hitCount = #self.grid[gx][gz].hits
+    if hitCount == 1 then
+        self.cumulativeCells = self.cumulativeCells + 1
+    elseif hitCount == 2 then
+        self.cumulativeMultiLayer = self.cumulativeMultiLayer + 1
+    end
+    if hitCount > self.peakMaxLayers then
+        self.peakMaxLayers = hitCount
+    end
 
     -- Maintain lightweight heightmap (min Y = ground)
     if not self.heightGrid[gx] then self.heightGrid[gx] = {} end
@@ -109,7 +152,7 @@ end
 --- @param chunkSize number grid cells per chunk side
 --- @return table { vertices = {}, indices = {}, vertexCount, indexCount }
 function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
-    local vertices = {}  -- flat array: x,y,z, nx,ny,nz per vertex
+    local vertices = {}  -- flat array: x,y,z, nx,ny,nz, mat per vertex
     local indices = {}   -- triangle indices (0-based)
     local vertexMap = {} -- gridKey -> vertexIndex
 
@@ -125,13 +168,14 @@ function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
                     local key = gx .. '_' .. gz .. '_' .. layerIdx
                     vertexMap[key] = vertIdx
 
-                    -- Add vertex: position + normal
+                    -- Add vertex: position + normal + material index
                     table.insert(vertices, hit.x)
                     table.insert(vertices, hit.y)
                     table.insert(vertices, hit.z)
                     table.insert(vertices, hit.nx)
                     table.insert(vertices, hit.ny)
                     table.insert(vertices, hit.nz)
+                    table.insert(vertices, hit.mat or -1)
 
                     vertIdx = vertIdx + 1
                 end
@@ -284,6 +328,7 @@ function MeshBuilder:BuildHeightmap()
 end
 
 --- Serialize a chunk to JSON string
+--- Vertex stride is 7: x, y, z, nx, ny, nz, materialIndex
 --- @param chunkData table from BuildChunk
 --- @param chunkIndex number
 --- @return string JSON
@@ -294,6 +339,7 @@ function MeshBuilder:ChunkToJSON(chunkData, chunkIndex)
     table.insert(parts, '"mapName":"' .. self.mapName .. '",')
     table.insert(parts, '"chunkIndex":' .. chunkIndex .. ',')
     table.insert(parts, '"gridSpacing":' .. self.spacing .. ',')
+    table.insert(parts, '"vertexStride":7,')
     table.insert(parts, '"vertexCount":' .. chunkData.vertexCount .. ',')
     table.insert(parts, '"indexCount":' .. chunkData.indexCount .. ',')
 
@@ -371,14 +417,21 @@ function MeshBuilder:GetStats()
     end
 
     -- Rough memory estimate: ~150 bytes per hit in Lua tables
-    local estMemoryMB = (self.totalHits * 150) / (1024 * 1024)
+    -- In streaming mode, freed hits are no longer in memory
+    local activeHits = self.totalHits - self.freedHits
+    local estMemoryMB = (activeHits * 150) / (1024 * 1024)
 
     return {
         totalHits = self.totalHits,
         droppedHits = self.droppedHits,
+        freedHits = self.freedHits,
+        activeHits = activeHits,
         cellCount = cellCount,
         multiLayerCells = multiLayerCells,
         maxLayers = maxLayers,
+        cumulativeCells = self.cumulativeCells,
+        cumulativeMultiLayer = self.cumulativeMultiLayer,
+        peakMaxLayers = self.peakMaxLayers,
         gridRangeX = { self.gridMinX, self.gridMaxX },
         gridRangeZ = { self.gridMinZ, self.gridMaxZ },
         estMemoryMB = math.floor(estMemoryMB * 10 + 0.5) / 10,
@@ -410,6 +463,7 @@ function MeshBuilder:FreeChunkData(chunkStartGX, chunkStartGZ, chunkSize)
         end
     end
 
+    self.freedHits = self.freedHits + hitsFreed
     return hitsFreed
 end
 

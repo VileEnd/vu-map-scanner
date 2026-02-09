@@ -65,10 +65,28 @@ function MapScanEngine:__init()
     self.m_WaitingForUploads = false
     self.m_UploadWaitStart = 0
 
+    -- Material name lookup table: materialIndex → name
+    self.m_MaterialNames = {}   -- populated at level load from MaterialContainerAsset
+    self.m_MaterialIndexSet = {} -- track unique indices seen during scan
+
+    -- Streaming export: scan and upload one chunk at a time to bound memory
+    -- Enabled via preset.streamingExport (e.g. insane preset)
+    self.m_StreamingEnabled = false
+    self.m_StreamChunks = {}         -- precomputed chunk grid regions
+    self.m_CurrentStreamChunk = 0    -- 1-based index into m_StreamChunks
+    self.m_ChunkPhase = 'idle'       -- 'topdown' or 'interior' within current chunk
+    self.m_ChunkGX = 0               -- current grid X within chunk scan
+    self.m_ChunkGZ = 0               -- current grid Z within chunk scan
+    self.m_ChunkInteriorCells = {}   -- cells with hits in current chunk (for interior scan)
+    self.m_ChunkInteriorIdx = 0
+    self.m_ChunkInteriorLayer = 0
+    self.m_StreamedChunkCount = 0    -- chunks successfully uploaded so far
+
     -- Event subscriptions
     Events:Subscribe('Level:Loaded', self, self.OnLevelLoaded)
     Events:Subscribe('Level:Destroy', self, self.OnLevelDestroy)
     Events:Subscribe('Engine:Update', self, self.OnEngineUpdate)
+    Events:Subscribe('Partition:Loaded', self, self.OnPartitionLoaded)
 
     -- RCON commands
     self.m_RconScan = RCON:RegisterCommand('mapscan.start', RemoteCommandFlag.RequiresLogin, self, self.OnRconStart)
@@ -99,6 +117,13 @@ function MapScanEngine:OnLevelLoaded(levelName, gameMode)
 
     self.m_CurrentGameMode = gameMode or 'ConquestLarge0'
     self.m_CurrentMapConfig = ScanConfig.GetMapConfig(levelName)
+    self.m_MaterialIndexSet = {}
+
+    if #self.m_MaterialNames > 0 then
+        log:Info('Material dictionary: %d material names loaded', #self.m_MaterialNames)
+    else
+        log:Warn('No material names loaded — material indices will be numeric only')
+    end
     if self.m_CurrentMapConfig then
         log:Info('Map recognized: %s (%s)', self.m_CurrentMapConfig.name, self.m_CurrentMapConfig.id)
         local spacing = ScanConfig.CalculateGridSpacing(self.m_CurrentMapConfig.width)
@@ -133,6 +158,49 @@ function MapScanEngine:OnLevelDestroy()
 end
 
 -- ============================================================================
+-- Material Name Registry — capture from MaterialContainerAsset partitions
+-- ============================================================================
+
+function MapScanEngine:OnPartitionLoaded(partition)
+    if partition == nil then return end
+    local instances = partition.instances
+    if instances == nil then return end
+
+    for _, instance in ipairs(instances) do
+        if instance:Is('MaterialContainerAsset') then
+            local asset = MaterialContainerAsset(instance)
+            if asset.materialNames ~= nil and #asset.materialNames > 0 then
+                for i, name in ipairs(asset.materialNames) do
+                    -- materialNames is 1-indexed in Lua, physicsMaterialIndex is 0-indexed
+                    self.m_MaterialNames[i - 1] = name
+                end
+                log:Info('Loaded %d material names from MaterialContainerAsset', #asset.materialNames)
+            end
+        end
+    end
+end
+
+--- Extract a physics material index from a RayCastHit
+--- Returns an integer index or -1 if unavailable
+function MapScanEngine:GetMaterialIndex(hit)
+    if hit.material == nil then
+        return -1
+    end
+
+    -- hit.material is a DataContainer, try casting to MaterialContainerPair
+    local ok, pair = pcall(function()
+        return MaterialContainerPair(hit.material)
+    end)
+    if ok and pair ~= nil then
+        local idx = pair.physicsMaterialIndex or -1
+        self.m_MaterialIndexSet[idx] = true
+        return idx
+    end
+
+    return -1
+end
+
+-- ============================================================================
 -- RCON Command Handlers
 -- ============================================================================
 
@@ -150,7 +218,7 @@ function MapScanEngine:OnRconStart(command, args, loggedIn)
             ScanConfig.activePreset = preset
             log:Info('Preset overridden to: %s', preset)
         else
-            return { 'ERR', 'Unknown preset: ' .. preset .. '. Available: turbo, ultra, high, medium, low' }
+            return { 'ERR', 'Unknown preset: ' .. preset .. '. Available: insane, turbo, ultra, high, medium, low' }
         end
     end
 
@@ -231,7 +299,7 @@ function MapScanEngine:OnRconPreset(command, args, loggedIn)
             ScanConfig.activePreset = preset
             return { 'OK', 'Preset set to: ' .. preset }
         else
-            return { 'ERR', 'Unknown preset. Available: turbo, ultra, high, medium, low' }
+            return { 'ERR', 'Unknown preset. Available: insane, turbo, ultra, high, medium, low' }
         end
     end
     return { 'OK', 'Current preset: ' .. ScanConfig.activePreset }
@@ -334,10 +402,16 @@ function MapScanEngine:BeginScanAfterProbe()
 
     -- DataExporter already created in StartScan() before probe
 
+    -- Check if streaming export is enabled for this preset
+    self.m_StreamingEnabled = preset.streamingExport == true
+    if self.m_StreamingEnabled then
+        self:InitStreamingChunks()
+    end
+
     -- Start!
     self.m_IsScanning = true
     self.m_IsPaused = false
-    self.m_ScanPhase = 'topdown'
+    self.m_ScanPhase = self.m_StreamingEnabled and 'streaming' or 'topdown'
     self.m_CompletedCells = 0
     self.m_TotalRaysCast = 0
     self.m_StartTime = SharedUtils:GetTimeMS() / 1000
@@ -348,6 +422,9 @@ function MapScanEngine:BeginScanAfterProbe()
     log:Info('SCAN STARTED: %s (%s)', mapCfg.name, mapCfg.id)
     log:Info('  Preset: %s | Grid: %.1fm | Dimensions: %d x %d = %d cells',
         ScanConfig.activePreset, self.m_GridSpacing, gridW, gridH, self.m_TotalGridCells)
+    if self.m_StreamingEnabled then
+        log:Info('  STREAMING MODE: %d chunks (only 1 chunk in memory at a time)', #self.m_StreamChunks)
+    end
     log:Info('  Area: X[%.0f..%.0f] Z[%.0f..%.0f]',
         self.m_ScanMinX, self.m_ScanMaxX, self.m_ScanMinZ, self.m_ScanMaxZ)
     log:Info('  Height: Y=%.0f down to Y=%.0f', self.m_ScanHeight, self.m_ScanDepth)
@@ -421,7 +498,9 @@ function MapScanEngine:OnEngineUpdate(dt)
     local raysThisTick = 0
     local maxRays = preset.maxRaysPerTick
 
-    if self.m_ScanPhase == 'topdown' then
+    if self.m_StreamingEnabled then
+        raysThisTick = self:DoStreamingTick(maxRays)
+    elseif self.m_ScanPhase == 'topdown' then
         raysThisTick = self:DoTopDownScan(maxRays)
     elseif self.m_ScanPhase == 'interior' then
         raysThisTick = self:DoInteriorScan(maxRays)
@@ -433,8 +512,17 @@ function MapScanEngine:OnEngineUpdate(dt)
     local now = SharedUtils:GetTimeMS() / 1000
     if now - self.m_LastProgressReport >= 5.0 then
         self.m_LastProgressReport = now
-        log:Progress(self.m_CompletedCells, self.m_TotalGridCells,
-            string.format('[%s] rays=%d hits=%d', self.m_ScanPhase, self.m_TotalRaysCast, self.m_MeshBuilder.totalHits))
+        if self.m_StreamingEnabled then
+            local activeHits = self.m_MeshBuilder.totalHits - (self.m_MeshBuilder.freedHits or 0)
+            log:Progress(self.m_CompletedCells, self.m_TotalGridCells,
+                string.format('[streaming chunk %d/%d %s] rays=%d hits=%d active\xe2\x89\x88%.1fMB',
+                    self.m_CurrentStreamChunk, #self.m_StreamChunks, self.m_ChunkPhase,
+                    self.m_TotalRaysCast, self.m_MeshBuilder.totalHits,
+                    (activeHits * 150) / (1024 * 1024)))
+        else
+            log:Progress(self.m_CompletedCells, self.m_TotalGridCells,
+                string.format('[%s] rays=%d hits=%d', self.m_ScanPhase, self.m_TotalRaysCast, self.m_MeshBuilder.totalHits))
+        end
     end
 end
 
@@ -472,20 +560,40 @@ function MapScanEngine:DoTopDownScan(maxRays)
         local from = Vec3(self.m_CurrentX, self.m_ScanHeight, self.m_CurrentZ)
         local to = Vec3(self.m_CurrentX, self.m_ScanDepth, self.m_CurrentZ)
 
-        -- RayCastFlags: DontCheckWater(4) + DontCheckCharacter(32) + DontCheckRagdoll(16) = 52
-        local flags = 52
-        local hits = RaycastManager:DetailedRaycast(from, to, 10, 0, flags)
+        -- RayCastFlags: 0 = check everything (water, vehicles, ragdolls, characters, groups)
+        local flags = 0
+        local preset = ScanConfig.GetPreset()
+        local maxHits = preset.topdownMaxHits or 10
+        local hits = RaycastManager:DetailedRaycast(from, to, maxHits, 0, flags)
 
         if hits ~= nil and #hits > 0 then
-            table.insert(self.m_InteriorCells, { x = self.m_CurrentX, z = self.m_CurrentZ })
+            -- Track Y bounds for interior scanning
+            local minHitY = math.huge
+            local maxHitY = -math.huge
 
             for _, hit in ipairs(hits) do
                 if hit.position ~= nil and hit.normal ~= nil then
+                    local matIdx = self:GetMaterialIndex(hit)
                     self.m_MeshBuilder:AddHit(
                         hit.position.x, hit.position.y, hit.position.z,
-                        hit.normal.x, hit.normal.y, hit.normal.z
+                        hit.normal.x, hit.normal.y, hit.normal.z,
+                        matIdx
                     )
+                    if hit.position.y < minHitY then minHitY = hit.position.y end
+                    if hit.position.y > maxHitY then maxHitY = hit.position.y end
                 end
+            end
+
+            -- Only queue for interior scan if multi-layer (>=2 hits means
+            -- there's geometry above the ground: roof, bridge, overhang).
+            -- Single-hit cells are open terrain — no walls to capture.
+            if #hits >= 2 then
+                table.insert(self.m_InteriorCells, {
+                    x = self.m_CurrentX,
+                    z = self.m_CurrentZ,
+                    yMin = minHitY,
+                    yMax = maxHitY
+                })
             end
         end
 
@@ -524,6 +632,17 @@ function MapScanEngine:DoInteriorScan(maxRays)
         local scanY = self.m_InteriorLayers[self.m_CurrentInteriorLayer]
 
         if cell and scanY then
+            -- Skip layers outside this cell's actual geometry Y bounds
+            -- (a building at Y=130-145 doesn't need scanning at Y=200)
+            local pad = self.m_GridSpacing * 2
+            if cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad) then
+                -- Skip this layer entirely for this cell — no geometry here
+                self.m_CompletedCells = self.m_CompletedCells + 1
+                self.m_CurrentInteriorIdx = self.m_CurrentInteriorIdx + 1
+                -- Don't count as rays cast — free skip
+                return raysCast
+            end
+
             local rayLength = self.m_GridSpacing * 3
             local directions = {
                 { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
@@ -532,7 +651,7 @@ function MapScanEngine:DoInteriorScan(maxRays)
             }
 
             local origin = Vec3(cell.x, scanY, cell.z)
-            local flags = 52
+            local flags = 0  -- check everything (water, vehicles, ragdolls, characters, groups)
 
             for _, dir in ipairs(directions) do
                 local target = Vec3(
@@ -545,9 +664,11 @@ function MapScanEngine:DoInteriorScan(maxRays)
                 if hits ~= nil then
                     for _, hit in ipairs(hits) do
                         if hit.position ~= nil and hit.normal ~= nil then
+                            local matIdx = self:GetMaterialIndex(hit)
                             self.m_MeshBuilder:AddHit(
                                 hit.position.x, hit.position.y, hit.position.z,
-                                hit.normal.x, hit.normal.y, hit.normal.z
+                                hit.normal.x, hit.normal.y, hit.normal.z,
+                                matIdx
                             )
                         end
                     end
@@ -562,6 +683,346 @@ function MapScanEngine:DoInteriorScan(maxRays)
     end
 
     return raysCast
+end
+
+-- ============================================================================
+-- Streaming Mode: Scan and upload one chunk at a time.
+-- Only one chunk's worth of hit data is in memory at any time.
+-- Enabled via preset.streamingExport = true (e.g. insane preset).
+-- ============================================================================
+
+--- Pre-compute chunk boundaries from scan area grid indices
+function MapScanEngine:InitStreamingChunks()
+    local spacing = self.m_GridSpacing
+    local gridMinGX = math.floor(self.m_ScanMinX / spacing + 0.5)
+    local gridMaxGX = math.floor(self.m_ScanMaxX / spacing + 0.5)
+    local gridMinGZ = math.floor(self.m_ScanMinZ / spacing + 0.5)
+    local gridMaxGZ = math.floor(self.m_ScanMaxZ / spacing + 0.5)
+
+    local chunkSize = 64
+    self.m_StreamChunks = {}
+
+    for gx = gridMinGX, gridMaxGX, chunkSize do
+        for gz = gridMinGZ, gridMaxGZ, chunkSize do
+            table.insert(self.m_StreamChunks, {
+                startGX = gx,
+                startGZ = gz,
+                chunkSize = chunkSize,
+                endGX = math.min(gx + chunkSize - 1, gridMaxGX),
+                endGZ = math.min(gz + chunkSize - 1, gridMaxGZ),
+            })
+        end
+    end
+
+    -- Recompute total cells for accurate progress tracking
+    local totalCells = 0
+    for _, chunk in ipairs(self.m_StreamChunks) do
+        totalCells = totalCells + (chunk.endGX - chunk.startGX + 1) * (chunk.endGZ - chunk.startGZ + 1)
+    end
+    self.m_TotalGridCells = totalCells
+
+    self.m_CurrentStreamChunk = 1
+    self.m_StreamedChunkCount = 0
+    self:InitNextStreamChunk()
+
+    log:Info('Streaming mode: %d chunks (chunk size %d, grid GX[%d..%d] GZ[%d..%d], total cells %d)',
+        #self.m_StreamChunks, chunkSize, gridMinGX, gridMaxGX, gridMinGZ, gridMaxGZ, totalCells)
+end
+
+--- Reset state for scanning the next chunk
+function MapScanEngine:InitNextStreamChunk()
+    if self.m_CurrentStreamChunk > #self.m_StreamChunks then
+        return
+    end
+
+    local chunk = self.m_StreamChunks[self.m_CurrentStreamChunk]
+    self.m_ChunkPhase = 'topdown'
+    self.m_ChunkGX = chunk.startGX
+    self.m_ChunkGZ = chunk.startGZ
+    self.m_ChunkInteriorCells = {}
+    self.m_ChunkInteriorIdx = 0
+    self.m_ChunkInteriorLayer = 0
+
+    if ScanConfig.debugLogging then
+        log:Debug('Starting chunk %d/%d: GX[%d..%d] GZ[%d..%d]',
+            self.m_CurrentStreamChunk, #self.m_StreamChunks,
+            chunk.startGX, chunk.endGX, chunk.startGZ, chunk.endGZ)
+    end
+end
+
+--- Main streaming tick dispatcher
+function MapScanEngine:DoStreamingTick(maxRays)
+    if self.m_CurrentStreamChunk > #self.m_StreamChunks then
+        self:FinishStreamingScan()
+        return 0
+    end
+
+    if self.m_ChunkPhase == 'topdown' then
+        return self:DoChunkTopDown(maxRays)
+    elseif self.m_ChunkPhase == 'interior' then
+        return self:DoChunkInterior(maxRays)
+    end
+
+    return 0
+end
+
+--- Top-down scan within the current chunk's grid bounds
+function MapScanEngine:DoChunkTopDown(maxRays)
+    local chunk = self.m_StreamChunks[self.m_CurrentStreamChunk]
+    local preset = ScanConfig.GetPreset()
+    local maxHits = preset.topdownMaxHits or 10
+    local raysCast = 0
+
+    while raysCast < maxRays do
+        if self.m_ChunkGX > chunk.endGX then
+            self.m_ChunkGX = chunk.startGX
+            self.m_ChunkGZ = self.m_ChunkGZ + 1
+        end
+
+        if self.m_ChunkGZ > chunk.endGZ then
+            -- Chunk top-down complete
+            if preset.interiorPasses and #self.m_ChunkInteriorCells > 0 then
+                self.m_ChunkPhase = 'interior'
+                self.m_ChunkInteriorIdx = 1
+                self.m_ChunkInteriorLayer = 1
+                -- Add interior cells to total for progress tracking
+                self.m_TotalGridCells = self.m_TotalGridCells
+                    + (#self.m_ChunkInteriorCells * #self.m_InteriorLayers)
+                log:Debug('Chunk %d: top-down done (%d interior cells), starting interior',
+                    self.m_CurrentStreamChunk, #self.m_ChunkInteriorCells)
+            else
+                self:ExportAndAdvanceChunk()
+            end
+            return raysCast
+        end
+
+        local worldX = self.m_ChunkGX * self.m_GridSpacing
+        local worldZ = self.m_ChunkGZ * self.m_GridSpacing
+
+        local from = Vec3(worldX, self.m_ScanHeight, worldZ)
+        local to = Vec3(worldX, self.m_ScanDepth, worldZ)
+
+        local flags = 0
+        local hits = RaycastManager:DetailedRaycast(from, to, maxHits, 0, flags)
+
+        if hits ~= nil and #hits > 0 then
+            local minHitY = math.huge
+            local maxHitY = -math.huge
+
+            for _, hit in ipairs(hits) do
+                if hit.position ~= nil and hit.normal ~= nil then
+                    local matIdx = self:GetMaterialIndex(hit)
+                    self.m_MeshBuilder:AddHit(
+                        hit.position.x, hit.position.y, hit.position.z,
+                        hit.normal.x, hit.normal.y, hit.normal.z,
+                        matIdx
+                    )
+                    if hit.position.y < minHitY then minHitY = hit.position.y end
+                    if hit.position.y > maxHitY then maxHitY = hit.position.y end
+                end
+            end
+
+            -- Only queue for interior scan if multi-layer (>=2 vertical
+            -- hits indicate roofs/bridges/overhangs with walls to capture)
+            if #hits >= 2 then
+                table.insert(self.m_ChunkInteriorCells, {
+                    x = worldX, z = worldZ,
+                    yMin = minHitY, yMax = maxHitY
+                })
+            end
+        end
+
+        raysCast = raysCast + 1
+        self.m_CompletedCells = self.m_CompletedCells + 1
+        self.m_ChunkGX = self.m_ChunkGX + 1
+    end
+
+    return raysCast
+end
+
+--- Interior scan within the current chunk's cells
+function MapScanEngine:DoChunkInterior(maxRays)
+    local raysCast = 0
+
+    while raysCast < maxRays do
+        if self.m_ChunkInteriorIdx > #self.m_ChunkInteriorCells then
+            self.m_ChunkInteriorLayer = self.m_ChunkInteriorLayer + 1
+            self.m_ChunkInteriorIdx = 1
+
+            if self.m_ChunkInteriorLayer > #self.m_InteriorLayers then
+                log:Debug('Chunk %d: interior scan complete', self.m_CurrentStreamChunk)
+                self:ExportAndAdvanceChunk()
+                return raysCast
+            end
+        end
+
+        local cell = self.m_ChunkInteriorCells[self.m_ChunkInteriorIdx]
+        local scanY = self.m_InteriorLayers[self.m_ChunkInteriorLayer]
+
+        if cell and scanY then
+            -- Skip layers outside this cell's actual geometry Y bounds
+            local pad = self.m_GridSpacing * 2
+            if cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad) then
+                self.m_CompletedCells = self.m_CompletedCells + 1
+                self.m_ChunkInteriorIdx = self.m_ChunkInteriorIdx + 1
+                return raysCast
+            end
+
+            local rayLength = self.m_GridSpacing * 3
+            local directions = {
+                { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                { 0.707, 0.707 }, { -0.707, 0.707 },
+                { 0.707, -0.707 }, { -0.707, -0.707 },
+            }
+
+            local origin = Vec3(cell.x, scanY, cell.z)
+            local flags = 0
+
+            for _, dir in ipairs(directions) do
+                local target = Vec3(
+                    cell.x + dir[1] * rayLength,
+                    scanY,
+                    cell.z + dir[2] * rayLength
+                )
+
+                local hits = RaycastManager:DetailedRaycast(origin, target, 5, 0, flags)
+                if hits ~= nil then
+                    for _, hit in ipairs(hits) do
+                        if hit.position ~= nil and hit.normal ~= nil then
+                            local matIdx = self:GetMaterialIndex(hit)
+                            self.m_MeshBuilder:AddHit(
+                                hit.position.x, hit.position.y, hit.position.z,
+                                hit.normal.x, hit.normal.y, hit.normal.z,
+                                matIdx
+                            )
+                        end
+                    end
+                end
+
+                raysCast = raysCast + 1
+            end
+        end
+
+        self.m_CompletedCells = self.m_CompletedCells + 1
+        self.m_ChunkInteriorIdx = self.m_ChunkInteriorIdx + 1
+    end
+
+    return raysCast
+end
+
+--- Build mesh for current chunk, upload to S3, free memory, advance to next chunk
+function MapScanEngine:ExportAndAdvanceChunk()
+    local chunk = self.m_StreamChunks[self.m_CurrentStreamChunk]
+    local mapId = self.m_CurrentMapConfig.id
+
+    -- Build mesh for this chunk's grid region
+    local chunkData = self.m_MeshBuilder:BuildChunk(chunk.startGX, chunk.startGZ, chunk.chunkSize)
+
+    if chunkData.vertexCount > 0 then
+        self.m_StreamedChunkCount = self.m_StreamedChunkCount + 1
+        local chunkJSON = self.m_MeshBuilder:ChunkToJSON(chunkData, self.m_StreamedChunkCount)
+        self.m_DataExporter:ExportChunk(mapId, self.m_StreamedChunkCount, chunkJSON)
+
+        if ScanConfig.debugLogging then
+            log:Debug('Chunk %d/%d uploaded: %d verts, %d bytes -> chunk_%03d.json',
+                self.m_CurrentStreamChunk, #self.m_StreamChunks,
+                chunkData.vertexCount, #chunkJSON, self.m_StreamedChunkCount)
+        end
+    end
+
+    -- Free grid data for this chunk to reclaim memory immediately
+    local freed = self.m_MeshBuilder:FreeChunkData(chunk.startGX, chunk.startGZ, chunk.chunkSize)
+    if freed > 0 and ScanConfig.debugLogging then
+        log:Debug('Freed %d hits from chunk %d', freed, self.m_CurrentStreamChunk)
+    end
+
+    -- Clear interior cells for this chunk
+    self.m_ChunkInteriorCells = {}
+
+    -- Advance to next chunk
+    self.m_CurrentStreamChunk = self.m_CurrentStreamChunk + 1
+    if self.m_CurrentStreamChunk <= #self.m_StreamChunks then
+        self:InitNextStreamChunk()
+    end
+    -- If no more chunks, DoStreamingTick will call FinishStreamingScan on next tick
+end
+
+--- Final export after all streaming chunks are done: heightmap + manifest
+function MapScanEngine:FinishStreamingScan()
+    local elapsed = SharedUtils:GetTimeMS() / 1000 - self.m_StartTime
+    local stats = self.m_MeshBuilder:GetStats()
+    local mapId = self.m_CurrentMapConfig.id
+
+    log:Info('========================================')
+    log:Info('STREAMING SCAN COMPLETE: %s', self.m_CurrentMapConfig.name)
+    log:Info('  Total rays: %d', self.m_TotalRaysCast)
+    log:Info('  Total hits: %d (dropped: %d, freed: %d)', stats.totalHits, stats.droppedHits, stats.freedHits)
+    log:Info('  Cumulative cells: %d (multi-layer: %d, peak layers: %d)',
+        stats.cumulativeCells, stats.cumulativeMultiLayer, stats.peakMaxLayers)
+    log:Info('  Chunks uploaded: %d / %d regions', self.m_StreamedChunkCount, #self.m_StreamChunks)
+    log:Info('  Elapsed: %.1fs (%.1f min)', elapsed, elapsed / 60)
+    log:Info('========================================')
+
+    self.m_ScanPhase = 'exporting'
+
+    -- Upload heightmap (built from accumulated heightGrid — compact, never freed)
+    local heightmapJSON = self.m_MeshBuilder:HeightmapToJSON()
+    log:Info('Heightmap JSON: %d bytes', #heightmapJSON)
+    self.m_DataExporter:ExportHeightmap(mapId, heightmapJSON)
+
+    -- Build material map
+    local matMapParts = {}
+    for idx, _ in pairs(self.m_MaterialIndexSet) do
+        local name = self.m_MaterialNames[idx] or ('mat_' .. tostring(idx))
+        table.insert(matMapParts, string.format('"%d":"%s"', idx, name))
+    end
+    local matMapJSON = '{' .. table.concat(matMapParts, ',') .. '}'
+
+    -- Upload manifest
+    local manifestData = string.format(
+        '{"mapId":"%s","mapName":"%s","preset":"%s","gridSpacing":%.2f,' ..
+        '"totalHits":%d,"droppedHits":%d,' ..
+        '"cellCount":%d,"multiLayerCells":%d,"maxLayers":%d,' ..
+        '"totalRays":%d,"elapsedSeconds":%.1f,' ..
+        '"chunkCount":%d,"center":[%.2f,%.2f],"width":%d,' ..
+        '"yMin":%d,"yMax":%d,"scanTimestamp":%d,' ..
+        '"streamingMode":true,"materialMap":%s}',
+        mapId, self.m_CurrentMapConfig.name, ScanConfig.activePreset, self.m_GridSpacing,
+        stats.totalHits, stats.droppedHits,
+        stats.cumulativeCells, stats.cumulativeMultiLayer, stats.peakMaxLayers,
+        self.m_TotalRaysCast, elapsed,
+        self.m_StreamedChunkCount,
+        self.m_CurrentMapConfig.center[1], self.m_CurrentMapConfig.center[2],
+        self.m_CurrentMapConfig.width,
+        self.m_CurrentMapConfig.yMin, self.m_CurrentMapConfig.yMax,
+        os.time(),
+        matMapJSON
+    )
+    self.m_DataExporter:ExportManifest(mapId, manifestData)
+
+    -- Send heightmap to clients
+    NetEvents:BroadcastLocal('MapScanner:HeightmapData', heightmapJSON)
+
+    log:Info('Export: 1 heightmap + %d chunks + 1 manifest -> S3', self.m_StreamedChunkCount)
+
+    -- Mark map as scanned
+    self.m_ScannedMaps[mapId] = true
+
+    self.m_ScanPhase = 'complete'
+    self.m_IsScanning = false
+
+    NetEvents:BroadcastLocal('MapScanner:ScanComplete', {
+        mapId = mapId,
+        totalHits = stats.totalHits,
+        elapsed = elapsed,
+    })
+
+    -- Wait for uploads before rotating
+    if ScanConfig.autoRotate then
+        self.m_WaitingForUploads = true
+        self.m_UploadWaitStart = SharedUtils:GetTimeMS() / 1000
+        log:Info('Waiting for S3 uploads to complete before map rotation...')
+    end
 end
 
 -- ============================================================================
@@ -622,12 +1083,23 @@ function MapScanEngine:ExportData()
 
     -- 3. Export manifest with scan metadata
     local elapsed = SharedUtils:GetTimeMS() / 1000 - self.m_StartTime
+
+    -- Build material map JSON: { "0": "Concrete", "1": "Metal", ... }
+    local matMapParts = {}
+    for idx, _ in pairs(self.m_MaterialIndexSet) do
+        local name = self.m_MaterialNames[idx] or ('mat_' .. tostring(idx))
+        table.insert(matMapParts, string.format('"%d":"%s"', idx, name))
+    end
+    local matMapJSON = '{' .. table.concat(matMapParts, ',') .. '}'
+    log:Info('Material map: %d unique materials captured', #matMapParts)
+
     local manifestData = string.format(
         '{"mapId":"%s","mapName":"%s","preset":"%s","gridSpacing":%.2f,' ..
         '"totalHits":%d,"droppedHits":%d,"cellCount":%d,"multiLayerCells":%d,"maxLayers":%d,' ..
         '"totalRays":%d,"elapsedSeconds":%.1f,' ..
         '"chunkCount":%d,"center":[%.2f,%.2f],"width":%d,' ..
-        '"yMin":%d,"yMax":%d,"scanTimestamp":%d}',
+        '"yMin":%d,"yMax":%d,"scanTimestamp":%d,' ..
+        '"materialMap":%s}',
         mapId, self.m_CurrentMapConfig.name, ScanConfig.activePreset, self.m_GridSpacing,
         stats.totalHits, stats.droppedHits, stats.cellCount, stats.multiLayerCells, stats.maxLayers,
         self.m_TotalRaysCast, elapsed,

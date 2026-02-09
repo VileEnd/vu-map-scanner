@@ -114,13 +114,13 @@ This downloads all scan data from S3 and produces GLB files in `public/assets/ma
 ## Scanning Process
 
 ### Phase 1: Top-Down Scan
-Casts rays straight down from above the map (`yMax + 100`) to below (`yMin - 50`). Each ray uses `DetailedRaycast` with up to 10 hits.
+Casts rays straight down from above the map (`yMax + 100`) to below (`yMin - 50`). Each ray uses `DetailedRaycast` with up to 10 hits. Captures physics material index from each hit.
 
 ### Phase 2: Interior Scan
 For cells that had hits, casts horizontal rays in 8 directions at multiple vertical layers to capture walls, doorways, and multi-story interiors.
 
 ### Phase 3: S3 Export
-Uploads heightmap JSON, mesh chunks, and a manifest to S3:
+Uploads heightmap JSON, mesh chunks (with material indices), and a manifest to S3:
 ```
 mapscans/<mapId>/<preset>/
   ├── manifest.json     # scan metadata
@@ -137,6 +137,7 @@ Uses RCON commands to switch to the next map in the rotation list.
 
 | Preset | Grid Spacing (small/med/large) | Interior Scan | Rays/Tick | Use Case |
 |--------|-------------------------------|---------------|-----------|----------|
+| `insane` | **0.3m fixed** (no scaling) | Yes (0.3m layers) | 200 | 30cm everywhere, small/medium maps |
 | `turbo`  | 4m / 8m / 16m | Yes (5m layers) | 2000 | Headless, no players |
 | `ultra`  | 1m / 2m / 4m | Yes (3m layers) | 500 | Highest detail |
 | `high`   | 2m / 4m / 8m | Yes (4m layers) | 500 | Good detail |
