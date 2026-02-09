@@ -635,47 +635,44 @@ function MapScanEngine:DoInteriorScan(maxRays)
             -- Skip layers outside this cell's actual geometry Y bounds
             -- (a building at Y=130-145 doesn't need scanning at Y=200)
             local pad = self.m_GridSpacing * 2
-            if cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad) then
-                -- Skip this layer entirely for this cell — no geometry here
-                self.m_CompletedCells = self.m_CompletedCells + 1
-                self.m_CurrentInteriorIdx = self.m_CurrentInteriorIdx + 1
-                -- Don't count as rays cast — free skip
-                return raysCast
-            end
+            local skipLayer = cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad)
 
-            local rayLength = self.m_GridSpacing * 3
-            local directions = {
-                { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
-                { 0.707, 0.707 }, { -0.707, 0.707 },
-                { 0.707, -0.707 }, { -0.707, -0.707 },
-            }
+            if not skipLayer then
+                local rayLength = self.m_GridSpacing * 3
+                local directions = {
+                    { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                    { 0.707, 0.707 }, { -0.707, 0.707 },
+                    { 0.707, -0.707 }, { -0.707, -0.707 },
+                }
 
-            local origin = Vec3(cell.x, scanY, cell.z)
-            local flags = 0  -- check everything (water, vehicles, ragdolls, characters, groups)
+                local origin = Vec3(cell.x, scanY, cell.z)
+                local flags = 0  -- check everything (water, vehicles, ragdolls, characters, groups)
 
-            for _, dir in ipairs(directions) do
-                local target = Vec3(
-                    cell.x + dir[1] * rayLength,
-                    scanY,
-                    cell.z + dir[2] * rayLength
-                )
+                for _, dir in ipairs(directions) do
+                    local target = Vec3(
+                        cell.x + dir[1] * rayLength,
+                        scanY,
+                        cell.z + dir[2] * rayLength
+                    )
 
-                local hits = RaycastManager:DetailedRaycast(origin, target, 5, 0, flags)
-                if hits ~= nil then
-                    for _, hit in ipairs(hits) do
-                        if hit.position ~= nil and hit.normal ~= nil then
-                            local matIdx = self:GetMaterialIndex(hit)
-                            self.m_MeshBuilder:AddHit(
-                                hit.position.x, hit.position.y, hit.position.z,
-                                hit.normal.x, hit.normal.y, hit.normal.z,
-                                matIdx
-                            )
+                    local hits = RaycastManager:DetailedRaycast(origin, target, 5, 0, flags)
+                    if hits ~= nil then
+                        for _, hit in ipairs(hits) do
+                            if hit.position ~= nil and hit.normal ~= nil then
+                                local matIdx = self:GetMaterialIndex(hit)
+                                self.m_MeshBuilder:AddHit(
+                                    hit.position.x, hit.position.y, hit.position.z,
+                                    hit.normal.x, hit.normal.y, hit.normal.z,
+                                    matIdx
+                                )
+                            end
                         end
                     end
-                end
 
-                raysCast = raysCast + 1
+                    raysCast = raysCast + 1
+                end
             end
+            -- If skipLayer: free skip, no rays consumed — falls through to increment below
         end
 
         self.m_CompletedCells = self.m_CompletedCells + 1
@@ -862,45 +859,44 @@ function MapScanEngine:DoChunkInterior(maxRays)
         if cell and scanY then
             -- Skip layers outside this cell's actual geometry Y bounds
             local pad = self.m_GridSpacing * 2
-            if cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad) then
-                self.m_CompletedCells = self.m_CompletedCells + 1
-                self.m_ChunkInteriorIdx = self.m_ChunkInteriorIdx + 1
-                return raysCast
-            end
+            local skipLayer = cell.yMin and cell.yMax and (scanY < cell.yMin - pad or scanY > cell.yMax + pad)
 
-            local rayLength = self.m_GridSpacing * 3
-            local directions = {
-                { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
-                { 0.707, 0.707 }, { -0.707, 0.707 },
-                { 0.707, -0.707 }, { -0.707, -0.707 },
-            }
+            if not skipLayer then
+                local rayLength = self.m_GridSpacing * 3
+                local directions = {
+                    { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                    { 0.707, 0.707 }, { -0.707, 0.707 },
+                    { 0.707, -0.707 }, { -0.707, -0.707 },
+                }
 
-            local origin = Vec3(cell.x, scanY, cell.z)
-            local flags = 0
+                local origin = Vec3(cell.x, scanY, cell.z)
+                local flags = 0
 
-            for _, dir in ipairs(directions) do
-                local target = Vec3(
-                    cell.x + dir[1] * rayLength,
-                    scanY,
-                    cell.z + dir[2] * rayLength
-                )
+                for _, dir in ipairs(directions) do
+                    local target = Vec3(
+                        cell.x + dir[1] * rayLength,
+                        scanY,
+                        cell.z + dir[2] * rayLength
+                    )
 
-                local hits = RaycastManager:DetailedRaycast(origin, target, 5, 0, flags)
-                if hits ~= nil then
-                    for _, hit in ipairs(hits) do
-                        if hit.position ~= nil and hit.normal ~= nil then
-                            local matIdx = self:GetMaterialIndex(hit)
-                            self.m_MeshBuilder:AddHit(
-                                hit.position.x, hit.position.y, hit.position.z,
-                                hit.normal.x, hit.normal.y, hit.normal.z,
-                                matIdx
-                            )
+                    local hits = RaycastManager:DetailedRaycast(origin, target, 5, 0, flags)
+                    if hits ~= nil then
+                        for _, hit in ipairs(hits) do
+                            if hit.position ~= nil and hit.normal ~= nil then
+                                local matIdx = self:GetMaterialIndex(hit)
+                                self.m_MeshBuilder:AddHit(
+                                    hit.position.x, hit.position.y, hit.position.z,
+                                    hit.normal.x, hit.normal.y, hit.normal.z,
+                                    matIdx
+                                )
+                            end
                         end
                     end
-                end
 
-                raysCast = raysCast + 1
+                    raysCast = raysCast + 1
+                end
             end
+            -- If skipLayer: free skip, no rays consumed — falls through to increment below
         end
 
         self.m_CompletedCells = self.m_CompletedCells + 1

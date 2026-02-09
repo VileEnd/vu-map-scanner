@@ -157,13 +157,23 @@ function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
     local vertexMap = {} -- gridKey -> vertexIndex
 
     local vertIdx = 0
+    local maxLayerInChunk = 0
 
-    -- First pass: collect vertices for this chunk
+    -- First pass: sort hits by Y ascending and collect vertices.
+    -- Sorting ensures layer 1 = ground (lowest hit) everywhere, so adjacent
+    -- cells connect ground-to-ground. Without this, layer 1 at a building cell
+    -- is the roof (raycasts return top-to-bottom), creating jagged transitions.
     for gx = chunkStartGX, chunkStartGX + chunkSize - 1 do
         for gz = chunkStartGZ, chunkStartGZ + chunkSize - 1 do
             if self.grid[gx] and self.grid[gx][gz] then
                 local cell = self.grid[gx][gz]
-                -- For each layer/hit in this cell
+                -- Sort hits by Y ascending: layer 1 = ground, layer N = highest surface
+                table.sort(cell.hits, function(a, b) return a.y < b.y end)
+
+                if #cell.hits > maxLayerInChunk then
+                    maxLayerInChunk = #cell.hits
+                end
+
                 for layerIdx, hit in ipairs(cell.hits) do
                     local key = gx .. '_' .. gz .. '_' .. layerIdx
                     vertexMap[key] = vertIdx
@@ -183,51 +193,55 @@ function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
         end
     end
 
-    -- Second pass: build triangles connecting adjacent ground-layer vertices
-    -- For the primary (lowest) hit in each cell, create quads (2 triangles) with neighbors
+    -- Second pass: build horizontal surface triangles for EVERY layer.
+    -- Previously only layer 1 was triangulated — building roofs, interior
+    -- floors, and ceilings were stored as vertices but never connected.
+    for layer = 1, maxLayerInChunk do
+        for gx = chunkStartGX, chunkStartGX + chunkSize - 2 do
+            for gz = chunkStartGZ, chunkStartGZ + chunkSize - 2 do
+                local k00 = gx .. '_' .. gz .. '_' .. layer
+                local k10 = (gx + 1) .. '_' .. gz .. '_' .. layer
+                local k01 = gx .. '_' .. (gz + 1) .. '_' .. layer
+                local k11 = (gx + 1) .. '_' .. (gz + 1) .. '_' .. layer
+
+                local v00 = vertexMap[k00]
+                local v10 = vertexMap[k10]
+                local v01 = vertexMap[k01]
+                local v11 = vertexMap[k11]
+
+                -- Only create triangles where all 4 corners exist
+                if v00 and v10 and v01 and v11 then
+                    table.insert(indices, v00)
+                    table.insert(indices, v10)
+                    table.insert(indices, v01)
+                    table.insert(indices, v10)
+                    table.insert(indices, v11)
+                    table.insert(indices, v01)
+                -- Partial quads with 3 vertices: single triangle
+                elseif v00 and v10 and v01 then
+                    table.insert(indices, v00)
+                    table.insert(indices, v10)
+                    table.insert(indices, v01)
+                elseif v00 and v10 and v11 then
+                    table.insert(indices, v00)
+                    table.insert(indices, v10)
+                    table.insert(indices, v11)
+                elseif v00 and v01 and v11 then
+                    table.insert(indices, v00)
+                    table.insert(indices, v01)
+                    table.insert(indices, v11)
+                elseif v10 and v01 and v11 then
+                    table.insert(indices, v10)
+                    table.insert(indices, v01)
+                    table.insert(indices, v11)
+                end
+            end
+        end
+    end
+
+    -- Third pass: vertical wall faces between layers (both X and Z directions)
     for gx = chunkStartGX, chunkStartGX + chunkSize - 2 do
         for gz = chunkStartGZ, chunkStartGZ + chunkSize - 2 do
-            local k00 = gx .. '_' .. gz .. '_1'
-            local k10 = (gx + 1) .. '_' .. gz .. '_1'
-            local k01 = gx .. '_' .. (gz + 1) .. '_1'
-            local k11 = (gx + 1) .. '_' .. (gz + 1) .. '_1'
-
-            local v00 = vertexMap[k00]
-            local v10 = vertexMap[k10]
-            local v01 = vertexMap[k01]
-            local v11 = vertexMap[k11]
-
-            -- Only create triangles where all 4 corners exist
-            if v00 and v10 and v01 and v11 then
-                -- Triangle 1: v00, v10, v01
-                table.insert(indices, v00)
-                table.insert(indices, v10)
-                table.insert(indices, v01)
-                -- Triangle 2: v10, v11, v01
-                table.insert(indices, v10)
-                table.insert(indices, v11)
-                table.insert(indices, v01)
-            -- Partial quads with 3 vertices: single triangle
-            elseif v00 and v10 and v01 then
-                table.insert(indices, v00)
-                table.insert(indices, v10)
-                table.insert(indices, v01)
-            elseif v00 and v10 and v11 then
-                table.insert(indices, v00)
-                table.insert(indices, v10)
-                table.insert(indices, v11)
-            elseif v00 and v01 and v11 then
-                table.insert(indices, v00)
-                table.insert(indices, v01)
-                table.insert(indices, v11)
-            elseif v10 and v01 and v11 then
-                table.insert(indices, v10)
-                table.insert(indices, v01)
-                table.insert(indices, v11)
-            end
-
-            -- Connect interior layers vertically where they exist
-            -- This creates "walls" between floor and ceiling hits
             local maxLayers = 0
             if self.grid[gx] and self.grid[gx][gz] then
                 maxLayers = #self.grid[gx][gz].hits
@@ -235,15 +249,16 @@ function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
             for layer = 1, maxLayers - 1 do
                 local kCurr = gx .. '_' .. gz .. '_' .. layer
                 local kNext = gx .. '_' .. gz .. '_' .. (layer + 1)
-                local kRight = (gx + 1) .. '_' .. gz .. '_' .. layer
-                local kRightNext = (gx + 1) .. '_' .. gz .. '_' .. (layer + 1)
 
                 local vc = vertexMap[kCurr]
                 local vn = vertexMap[kNext]
+
+                -- Vertical wall in X direction
+                local kRight = (gx + 1) .. '_' .. gz .. '_' .. layer
+                local kRightNext = (gx + 1) .. '_' .. gz .. '_' .. (layer + 1)
                 local vr = vertexMap[kRight]
                 local vrn = vertexMap[kRightNext]
 
-                -- Vertical face between layers at same column
                 if vc and vn and vr and vrn then
                     table.insert(indices, vc)
                     table.insert(indices, vn)
@@ -251,6 +266,21 @@ function MeshBuilder:BuildChunk(chunkStartGX, chunkStartGZ, chunkSize)
                     table.insert(indices, vn)
                     table.insert(indices, vrn)
                     table.insert(indices, vr)
+                end
+
+                -- Vertical wall in Z direction
+                local kFront = gx .. '_' .. (gz + 1) .. '_' .. layer
+                local kFrontNext = gx .. '_' .. (gz + 1) .. '_' .. (layer + 1)
+                local vf = vertexMap[kFront]
+                local vfn = vertexMap[kFrontNext]
+
+                if vc and vn and vf and vfn then
+                    table.insert(indices, vc)
+                    table.insert(indices, vn)
+                    table.insert(indices, vf)
+                    table.insert(indices, vn)
+                    table.insert(indices, vfn)
+                    table.insert(indices, vf)
                 end
             end
         end

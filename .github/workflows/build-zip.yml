@@ -1,0 +1,66 @@
+name: Build trimmed zip
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create zip
+        shell: bash
+        run: |
+          mkdir -p dist
+          zip -r "dist/MapScanner.zip" . \
+            -x "tools/*" \
+            -x "dist/*" \
+            -x "output/*" \
+            -x "**/*.md" \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x ".gitignore"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapScanner
+          path: dist/MapScanner.zip
+
+      - name: Build release notes
+        id: release_notes
+        shell: bash
+        run: |
+          git fetch --tags --force
+          if git rev-parse "latest" >/dev/null 2>&1; then
+            range="latest..HEAD"
+          else
+            range="HEAD"
+          fi
+          {
+            echo "Release notes"
+            echo ""
+            echo "Changes:"
+            git log $range --pretty=format:"- %s (%h)" --name-status
+          } > RELEASE_NOTES.txt
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          cat RELEASE_NOTES.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          body: ${{ steps.release_notes.outputs.notes }}
+          files: dist/MapScanner.zip
+          draft: false
+          prerelease: false
